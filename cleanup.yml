@@ -5,39 +5,10 @@
   vars:
     gcp_project_id: ""
     gcp_service_account_file: ""
-    instruqt_api_token: 
+    instruqt_api_token: ""
   tasks:
 
-
-    - name: Execute GraphQL query for track images
-      ansible.builtin.uri:
-        url: https://play.instruqt.com/graphql
-        method: POST
-        headers:
-          Content-Type: application/json
-          Authorization: "Bearer {{ instruqt_api_token }}"
-        body: |
-          {
-            "query": "query trackimages { tracks(organizationSlug: \"redhat\", orderBy: title_ASC) { slug title maintenance config { virtualmachines { image machine_type } } } }"
-          }
-        body_format: json
-      register: graphql_response
-      failed_when: graphql_response.status != 200
-      check_mode: false
-
-    - name: Extract VM images from GraphQL response
-      ansible.builtin.set_fact:
-        vm_images: "{{ graphql_response.json.data.tracks | json_query('[].config.virtualmachines[].image') | unique }}"
-
-    - name: Filter VM images to include only project ID
-      ansible.builtin.set_fact:
-        instruqt_images: "{{ vm_images | select('search', '^{{ gcp_project_id }}/') | list }}"
-
-    - name: Display the filtered VM images
-      ansible.builtin.debug:
-        var: instruqt_images
-
-    - name: Get list of all VM images in the project
+    - name: Get list of all VM images in the GCP project
       google.cloud.gcp_compute_image_info:
         auth_kind: serviceaccount
         service_account_file: "{{ gcp_service_account_file }}"
@@ -59,23 +30,55 @@
       ansible.builtin.debug:
         msg: "{{ packer_images }}"
 
-    - name: Normalize Instruqt image names (remove prefix)
-      ansible.builtin.set_fact:
-        instruqt_images_normalized: "{{ instruqt_images | map('regex_replace', '^{{ gcp_project_id }}/', '') | list }}"
+    - name: Execute GraphQL query for Instruqt images
+      ansible.builtin.uri:
+        url: https://play.instruqt.com/graphql
+        method: POST
+        headers:
+          Content-Type: application/json
+          Authorization: "Bearer {{ instruqt_api_token }}"
+        body: |
+          {
+            "query": "query trackimages { tracks(organizationSlug: \"redhat\", orderBy: title_ASC) { slug title maintenance config { virtualmachines { image machine_type } } } }"
+          }
+        body_format: json
+      register: graphql_response
+      failed_when: graphql_response.status != 200
+      check_mode: false
 
-    - name: Determine images to delete
+    - name: Extract VM images from GraphQL response
       ansible.builtin.set_fact:
-        deletable_images: "{{ packer_images | difference(instruqt_images_normalized) }}"
+        vm_images: "{{ graphql_response.json.data.tracks | json_query('[].config.virtualmachines[].image') | unique }}"
+
+    - name: Display the VM images
+      ansible.builtin.debug:
+        var: vm_images
+
+    - name: Normalize Instruqt VM images to include only image name from just the project specified
+      ansible.builtin.set_fact:
+        instruqt_images: >-
+          {{ vm_images 
+            | select('search', '^' ~ gcp_project_id ~ '/') 
+            | map('regex_replace', '^' ~ gcp_project_id ~ '/', '') 
+            | list }}
+
+    - name: Verify normalized instruqt_images
+      ansible.builtin.debug:
+        var: instruqt_images
+
+    - name: Determine images to delete (packer_images - instruqt_images = deletable_images)
+      ansible.builtin.set_fact:
+        deletable_images: "{{ packer_images | difference(instruqt_images) }}"
 
     - name: Display images that can be deleted
       ansible.builtin.debug:
         var: deletable_images
 
-    - name: Check-mode simulation of deletions
-      ansible.builtin.debug:
-        msg: "Image {{ item }} would be deleted"
-      loop: "{{ deletable_images }}"
-      when: ansible_check_mode
+    # - name: Check-mode simulation of deletions
+    #   ansible.builtin.debug:
+    #     msg: "Image {{ item }} would be deleted"
+    #   loop: "{{ deletable_images }}"
+    #   when: ansible_check_mode
 
     - name: Delete unused images
       google.cloud.gcp_compute_image:
@@ -87,3 +90,11 @@
       loop: "{{ deletable_images }}"
       when: deletable_images | length > 0
       register: delete_results
+
+    - name: Display the lengths of image lists and deleted images
+      ansible.builtin.debug:
+        msg:
+          - "Length of packer_images: {{ packer_images | length }}"
+          - "Length of instruqt_images: {{ instruqt_images | length }}"
+          - "Length of deletable_images: {{ deletable_images | length }}"
+          - "Number of images deleted: {{ delete_results.results | selectattr('changed', 'defined') | selectattr('changed', 'eq', true) | list | length }}"
