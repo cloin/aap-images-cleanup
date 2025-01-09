@@ -31,7 +31,7 @@
       failed_when: packer_images.resources is not defined or packer_images.resources | length == 0
       check_mode: false
 
-    - name: Filter images created within the last 30 days
+    - name: Filter out images created within the last 30 days
       ansible.builtin.set_fact:
         older_packer_images: >-
           {{ packer_images.resources
