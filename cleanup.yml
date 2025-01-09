@@ -8,27 +8,40 @@
     instruqt_api_token: ""
   tasks:
 
+    - name: Calculate 30 days ago date using shell
+      ansible.builtin.command: 'date -d "-30 days" +"%Y-%m-%d"'
+      register: thirty_days_ago_result
+      check_mode: false
+
+    - name: Set 30 days ago date
+      ansible.builtin.set_fact:
+        thirty_days_ago: "{{ thirty_days_ago_result.stdout }}"
+
+    - name: Debug the calculated date
+      ansible.builtin.debug:
+        msg: "30 days ago date: {{ thirty_days_ago }}"
+
     - name: Get list of all VM images in the GCP project
       google.cloud.gcp_compute_image_info:
         auth_kind: serviceaccount
         service_account_file: "{{ gcp_service_account_file }}"
         project: "{{ gcp_project_id }}"
-      register: gcp_images
-      failed_when: gcp_images.resources is not defined or gcp_images.resources | length == 0
+        filters: 'description = "Created by Packer"'
+      register: packer_images
+      failed_when: packer_images.resources is not defined or packer_images.resources | length == 0
       check_mode: false
 
-    - name: Filter packer-created images
+    - name: Filter images created within the last 30 days
       ansible.builtin.set_fact:
-        packer_images: >-
-          {{ gcp_images.resources
-             | selectattr('description', 'defined')
-             | selectattr('description', 'search', 'Created by Packer')
-             | map(attribute='name')
-             | list }}
+        older_packer_images: >-
+          {{ packer_images.resources
+            | selectattr('creationTimestamp', '<=', thirty_days_ago)
+            | map(attribute='name')
+            | list }}
 
-    - name: Display packer-created images
+    - name: Display older packer-created images
       ansible.builtin.debug:
-        msg: "{{ packer_images }}"
+        msg: "{{ older_packer_images }}"
 
     - name: Execute GraphQL query for Instruqt images
       ansible.builtin.uri:
@@ -66,19 +79,13 @@
       ansible.builtin.debug:
         var: instruqt_images
 
-    - name: Determine images to delete (packer_images - instruqt_images = deletable_images)
+    - name: Determine images to delete (older_packer_images - instruqt_images = deletable_images)
       ansible.builtin.set_fact:
-        deletable_images: "{{ packer_images | difference(instruqt_images) }}"
+        deletable_images: "{{ older_packer_images | difference(instruqt_images) }}"
 
     - name: Display images that can be deleted
       ansible.builtin.debug:
         var: deletable_images
-
-    # - name: Check-mode simulation of deletions
-    #   ansible.builtin.debug:
-    #     msg: "Image {{ item }} would be deleted"
-    #   loop: "{{ deletable_images }}"
-    #   when: ansible_check_mode
 
     - name: Delete unused images
       google.cloud.gcp_compute_image:
@@ -94,7 +101,7 @@
     - name: Display the lengths of image lists and deleted images
       ansible.builtin.debug:
         msg:
-          - "Length of packer_images: {{ packer_images | length }}"
+          - "Length of older_packer_images: {{ older_packer_images | length }}"
           - "Length of instruqt_images: {{ instruqt_images | length }}"
           - "Length of deletable_images: {{ deletable_images | length }}"
           - "Number of images deleted: {{ delete_results.results | selectattr('changed', 'defined') | selectattr('changed', 'eq', true) | list | length }}"
